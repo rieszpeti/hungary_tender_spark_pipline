@@ -1,0 +1,241 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bigdata
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: spark-master-hpa
+  namespace: bigdata
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: spark-master
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: spark-worker-hpa
+  namespace: bigdata
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: spark-worker
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: spark-shared-storage
+  namespace: bigdata
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteMany
+  hostPath:
+    path: "/tmp/spark-shared-storage"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: spark-shared-storage
+  namespace: bigdata
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-master
+  namespace: bigdata
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark
+      role: master
+  template:
+    metadata:
+      labels:
+        app: spark
+        role: master
+    spec:
+      containers:
+        - name: spark-master
+          image: apache/spark:latest
+          ports:
+            - containerPort: 7077
+            - containerPort: 8080
+          command:
+            - /opt/spark/bin/spark-class
+            - org.apache.spark.deploy.master.Master
+          volumeMounts:
+            - name: shared-storage
+              mountPath: /opt/workspace
+      volumes:
+        - name: shared-storage
+          persistentVolumeClaim:
+            claimName: spark-shared-storage
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-worker
+  namespace: bigdata
+spec:
+  replicas: 2  # You can adjust this as needed
+  selector:
+    matchLabels:
+      app: spark
+      role: worker
+  template:
+    metadata:
+      labels:
+        app: spark
+        role: worker
+    spec:
+      containers:
+        - name: spark-worker
+          image: apache/spark:latest
+          ports:
+            - containerPort: 8081
+          command:
+            - /opt/spark/bin/spark-class
+            - org.apache.spark.deploy.worker.Worker
+            - spark://spark-master:7077
+          volumeMounts:
+            - name: shared-storage
+              mountPath: /opt/workspace
+      volumes:
+        - name: shared-storage
+          persistentVolumeClaim:
+            claimName: spark-shared-storage
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: bigdata
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:latest
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: admin
+            - name: POSTGRES_PASSWORD
+              value: admin
+            - name: POSTGRES_DB
+              value: tender
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: postgres-data
+          hostPath:
+            path: /tmp/postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: bigdata
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jupyter
+  namespace: bigdata
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jupyter
+  template:
+    metadata:
+      labels:
+        app: jupyter
+    spec:
+      containers:
+        - name: jupyter
+          image: jupyter/pyspark-notebook:latest  # Official Jupyter image with PySpark
+          ports:
+            - containerPort: 8888
+          env:
+            - name: POSTGRES_USER
+              value: admin
+            - name: POSTGRES_PASSWORD
+              value: admin
+            - name: POSTGRES_DB
+              value: tender
+          volumeMounts:
+            - name: shared-storage
+              mountPath: /opt/workspace
+          command:
+            - "start-notebook.sh"  # This is the default entrypoint for Jupyter notebook
+          args:
+            - "--NotebookApp.token=''"  # Disable the token for access
+            - "--NotebookApp.ip='0.0.0.0'"  # Allow access from all IPs
+            - "--NotebookApp.port=8888"
+            - "--NotebookApp.notebook_dir=/opt/workspace"  # Set the notebook directory
+      volumes:
+        - name: shared-storage
+          persistentVolumeClaim:
+            claimName: spark-shared-storage
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jupyter
+  namespace: bigdata
+spec:
+  selector:
+    app: jupyter
+  ports:
+    - port: 8888
+      targetPort: 8888
+  type: NodePort
